@@ -14,6 +14,10 @@ app.use(cors());
 // Configure Multer for file uploads
 const upload = multer({ dest: 'uploads/' });
 
+app.get('/', (req, res) => {
+  res.send('PDF Converter Backend is Running!');
+});
+
 app.post('/convert', upload.single('pdfFile'), (req, res) => {
   if (!req.file) {
     return res.status(400).send('No file uploaded.');
