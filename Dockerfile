@@ -21,7 +21,7 @@ COPY . .
 RUN mkdir -p uploads
 
 # 6. Expose the port (Render typically uses 10000 or expects you to read PORT env)
-EXPOSE 3000
+EXPOSE 10000
 
 # 7. Start the server
 CMD ["node", "server.js"]
