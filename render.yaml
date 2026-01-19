@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: pdf-cmyk-backend
+    env: docker
+    region: ohio # or frankfurt, oregon, etc.
+    plan: free # Explicitly sets it to the free tier
+    branch: main # Ensure this matches your git branch (main vs master)
+    numInstances: 1
+    healthCheckPath: /
+    # This tells Render to look for the Dockerfile in the current directory
+    dockerContext: .
