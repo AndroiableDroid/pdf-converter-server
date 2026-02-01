@@ -135,6 +135,44 @@ app.post('/compress', upload.single('pdfFile'), (req, res) => {
   });
 });
 
+app.post('/merge', upload.array('pdfFiles', 20), (req, res) => {
+  if (!req.files || req.files.length < 2) {
+    return res.status(400).send('Please upload at least 2 PDF files.');
+  }
+
+  // 1. Prepare Paths
+  // Multer populates req.files (array), not req.file
+  const inputPaths = req.files.map(f => f.path);
+  const outputPath = `uploads/merged_${Date.now()}.pdf`;
+
+  // 2. Build Ghostscript Command
+  // Command: gs -dNOPAUSE -sDEVICE=pdfwrite -sOutputFile=out.pdf in1.pdf in2.pdf ...
+  const inputFilesString = inputPaths.map(p => `"${p}"`).join(' ');
+  const gsCommand = `gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile="${outputPath}" ${inputFilesString}`;
+
+  console.log(`Merging ${req.files.length} files...`);
+
+  exec(gsCommand, (error, stdout, stderr) => {
+    if (error) {
+      console.error(`Merge error: ${error}`);
+      return res.status(500).send('Merge failed.');
+    }
+
+    // 3. Send & Cleanup
+    res.download(outputPath, 'merged-document.pdf', (err) => {
+      if (err) console.error(err);
+      
+      // Delete output file
+      fs.unlinkSync(outputPath);
+      
+      // Delete ALL input files
+      inputPaths.forEach(path => {
+        if (fs.existsSync(path)) fs.unlinkSync(path);
+      });
+    });
+  });
+});
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${port}`);
 });
