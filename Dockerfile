@@ -5,7 +5,9 @@ FROM node:18-slim
 # We update apt-get and install ghostscript
 RUN apt-get update && apt-get install -y \
     ghostscript \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+# ...
 
 # 2. Set the working directory
 WORKDIR /app

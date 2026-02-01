@@ -6,6 +6,7 @@ const fs = require('fs');
 const cors = require('cors');
 
 const app = express();
+const archiver = require('archiver');
 const port = process.env.PORT || 3000;
 
 // Enable CORS for Angular
@@ -134,6 +135,100 @@ app.post('/compress', upload.single('pdfFile'), (req, res) => {
     });
   });
 });
+
+app.post('/extract', upload.single('pdfFile'), (req, res) => {
+  if (!req.file) return res.status(400).send('No file uploaded.');
+
+  const inputPath = req.file.path;
+  const outputDir = `uploads/extract_${Date.now()}`;
+  
+  // Create output directory
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+
+  // Get Parameters
+  const mode = req.body.mode || 'images'; // 'images' or 'pages'
+  const format = req.body.format || 'png'; // 'png', 'jpg', 'tiff'
+
+  console.log(`Processing: Mode=${mode}, Format=${format}`);
+
+  let cmd = '';
+  const outputPrefix = `${outputDir}/output`;
+
+  // --- STRATEGY SELECTION ---
+
+  if (mode === 'pages') {
+    // MODE 1: Convert Whole Pages (Uses Ghostscript)
+    // -r150 = 150 DPI (Good balance of quality/speed)
+    // %03d = Numbering (001, 002, 003)
+    
+    let device = 'png16m'; // Default PNG
+    if (format === 'jpg') device = 'jpeg';
+    if (format === 'tiff') device = 'tiff24nc';
+
+    // Output filename pattern: output-001.png
+    const outputFile = `${outputPrefix}-%03d.${format}`;
+    
+    cmd = `gs -dSAFER -dBATCH -dNOPAUSE -sDEVICE=${device} -r150 -sOutputFile="${outputFile}" "${inputPath}"`;
+  } 
+  else {
+    // MODE 2: Extract Embedded Images (Uses pdfimages)
+    let formatFlag = '-png';
+    if (format === 'jpg') formatFlag = '-j';
+    if (format === 'tiff') formatFlag = '-tiff';
+
+    cmd = `pdfimages ${formatFlag} "${inputPath}" "${outputPrefix}"`;
+  }
+
+  // --- EXECUTION ---
+
+  exec(cmd, (error, stdout, stderr) => {
+    if (error) {
+      console.error(`Exec Error: ${error}`);
+      cleanup(inputPath, outputDir);
+      return res.status(500).send('Processing failed.');
+    }
+
+    // Check if files exist
+    const extractedFiles = fs.readdirSync(outputDir);
+
+    if (extractedFiles.length === 0) {
+      cleanup(inputPath, outputDir);
+      const msg = mode === 'images' 
+        ? 'No embedded images found. Try "Extract Pages" instead.' 
+        : 'Could not render pages.';
+      return res.status(422).send(msg);
+    }
+
+    // Zip and Send
+    const zipPath = `${outputDir}.zip`;
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    output.on('close', () => {
+      const filename = mode === 'pages' ? `pages_${format}.zip` : `images_${format}.zip`;
+      res.download(zipPath, filename, (err) => {
+        cleanup(inputPath, outputDir, zipPath);
+      });
+    });
+
+    archive.on('error', (err) => {
+      cleanup(inputPath, outputDir, zipPath);
+      res.status(500).send('Zip creation failed.');
+    });
+
+    archive.pipe(output);
+    archive.directory(outputDir, false);
+    archive.finalize();
+  });
+});
+
+function cleanup(input, dir, zip = null) {
+  try {
+    if (fs.existsSync(input)) fs.unlinkSync(input);
+    if (zip && fs.existsSync(zip)) fs.unlinkSync(zip);
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {}
+}
 
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${port}`);
