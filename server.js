@@ -4,9 +4,9 @@ const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const archiver = require('archiver');
 
 const app = express();
-const archiver = require('archiver');
 const port = process.env.PORT || 3000;
 
 // Enable CORS for Angular
@@ -15,51 +15,76 @@ app.use(cors());
 // Configure Multer for file uploads
 const upload = multer({ dest: 'uploads/' });
 
+// --- HELPER FUNCTIONS ---
+
+const getFileSizeMB = (path) => {
+  try {
+    const stats = fs.statSync(path);
+    return stats.size / (1024 * 1024);
+  } catch (e) {
+    return 0;
+  }
+};
+
+const cleanup = (input, output = null, extraDir = null) => {
+  try {
+    if (input && fs.existsSync(input)) fs.unlinkSync(input);
+    if (output && fs.existsSync(output)) fs.unlinkSync(output);
+    if (extraDir && fs.existsSync(extraDir)) fs.rmSync(extraDir, { recursive: true, force: true });
+  } catch (e) {
+    console.error('Cleanup warning:', e.message);
+  }
+};
+
+// Check if the error was caused by a missing/wrong password
+const checkPasswordError = (stderr, stdout) => {
+  const output = (stderr + stdout).toLowerCase();
+  return output.includes('password') || output.includes('encrypted') || output.includes('this file requires a password');
+};
+
+// --- ROUTES ---
+
 app.get('/', (req, res) => {
   res.send('PDF Converter Backend is Running!');
 });
 
+// 1. CONVERT ROUTE (RGB -> CMYK)
 app.post('/convert', upload.single('pdfFile'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).send('No file uploaded.');
-  }
+  if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
   const outputPath = `uploads/output_${req.file.filename}.pdf`;
+  const password = req.body.password || '';
 
-  // Ghostscript command to convert RGB to CMYK
-  // Note: 'gs' is for Linux/Mac. On Windows, typically use 'gswin64c' or just 'gswin64'
-  const gsCommand = `gs -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -sColorConversionStrategy=CMYK -dProcessColorModel=/DeviceCMYK -sOutputFile="${outputPath}" "${inputPath}"`;
+  // Add password flag if provided
+  const passFlag = password ? `-sPDFPassword="${password}"` : '';
 
-  console.log('Processing file...');
+  const gsCommand = `gs -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -sColorConversionStrategy=CMYK -dProcessColorModel=/DeviceCMYK ${passFlag} -sOutputFile="${outputPath}" "${inputPath}"`;
+
+  console.log('Converting file...');
 
   exec(gsCommand, (error, stdout, stderr) => {
+    // 1. Check for Password Error
+    if (checkPasswordError(stderr, stdout)) {
+      cleanup(inputPath, outputPath);
+      return res.status(401).send('PASSWORD_REQUIRED');
+    }
+
+    // 2. Check for General Error
     if (error) {
-      console.error(`exec error: ${error}`);
+      console.error(`Convert exec error: ${error}`);
+      cleanup(inputPath, outputPath);
       return res.status(500).send('Error converting file.');
     }
 
-    // Send the converted file back to the client
+    // 3. Success
     res.download(outputPath, 'converted-cmyk.pdf', (err) => {
-      if (err) console.error(err);
-
-      // Cleanup: Delete temporary files
-      fs.unlinkSync(inputPath);
-      fs.unlinkSync(outputPath);
+      cleanup(inputPath, outputPath);
     });
-    console.log("Done Processing");
   });
 });
 
-// ... existing imports ...
-
-// Helper: Get file size in MB
-const getFileSizeMB = (path) => {
-  const stats = fs.statSync(path);
-  return stats.size / (1024 * 1024);
-};
-
-// COMPRESSION ROUTE
+// 2. COMPRESS ROUTE
 app.post('/compress', upload.single('pdfFile'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
@@ -67,139 +92,125 @@ app.post('/compress', upload.single('pdfFile'), (req, res) => {
   const outputPath = `uploads/compressed_${req.file.filename}.pdf`;
   const originalSize = getFileSizeMB(inputPath);
   
-  // Inputs from frontend
-  const mode = req.body.mode; // 'percentage' or 'target'
-  const value = parseFloat(req.body.value); // e.g., 50 (percent) or 2.5 (MB)
+  const mode = req.body.mode; 
+  const value = parseFloat(req.body.value);
+  const password = req.body.password || '';
 
-  let gsSettings = '/ebook'; // Default fallback
+  let gsSettings = '/ebook';
 
-  // --- LOGIC: Select Ghostscript Profile ---
-  
+  // Strategy Logic
   if (mode === 'target') {
-    const targetSize = value;
-    const requiredRatio = targetSize / originalSize;
-
-    if (requiredRatio >= 1) {
-       // Target is bigger than original; just do light cleanup
-       gsSettings = '/printer';
-    } else if (requiredRatio < 0.2) {
-       // Extreme compression needed (Target is < 20% of original)
-       gsSettings = '/screen'; 
-    } else if (requiredRatio < 0.6) {
-       // Moderate compression needed
-       gsSettings = '/ebook';
-    } else {
-       // Light compression needed
-       gsSettings = '/printer';
-    }
-  } 
-  
-  else if (mode === 'percentage') {
-    // Value represents "Quality Percentage" (100 = Best, 0 = Smallest)
-    if (value > 75) gsSettings = '/prepress';     // High Quality
-    else if (value > 50) gsSettings = '/printer'; // Medium-High
-    else if (value > 25) gsSettings = '/ebook';   // Medium-Low (Standard Web)
-    else gsSettings = '/screen';                  // Low Quality (Max Compression)
+    const requiredRatio = value / originalSize;
+    if (requiredRatio >= 1) gsSettings = '/printer';
+    else if (requiredRatio < 0.2) gsSettings = '/screen'; 
+    else if (requiredRatio < 0.6) gsSettings = '/ebook';
+    else gsSettings = '/printer';
+  } else if (mode === 'percentage') {
+    if (value > 75) gsSettings = '/prepress';
+    else if (value > 50) gsSettings = '/printer';
+    else if (value > 25) gsSettings = '/ebook';
+    else gsSettings = '/screen';
   }
 
-  // --- EXECUTE GHOSTSCRIPT ---
-  
-  // -dPDFSETTINGS presets:
-  // /screen   (72 dpi, smallest)
-  // /ebook    (150 dpi, medium)
-  // /printer  (300 dpi, high)
-  // /prepress (color preserving, largest)
-  
-  const gsCommand = `gs -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=${gsSettings} -sOutputFile="${outputPath}" "${inputPath}"`;
+  // Add password flag
+  const passFlag = password ? `-sPDFPassword="${password}"` : '';
 
-  console.log(`Compressing: Original ${originalSize.toFixed(2)}MB using settings ${gsSettings}`);
+  const gsCommand = `gs -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=${gsSettings} ${passFlag} -sOutputFile="${outputPath}" "${inputPath}"`;
+
+  console.log(`Compressing with settings ${gsSettings}`);
 
   exec(gsCommand, (error, stdout, stderr) => {
+    // 1. Check for Password Error
+    if (checkPasswordError(stderr, stdout)) {
+      cleanup(inputPath, outputPath);
+      return res.status(401).send('PASSWORD_REQUIRED');
+    }
+
+    // 2. Check for General Error
     if (error) {
-      console.error(`exec error: ${error}`);
+      console.error(`Compress exec error: ${error}`);
+      cleanup(inputPath, outputPath);
       return res.status(500).send('Compression failed.');
     }
 
-    // Verify Result
+    // 3. Success
     const newSize = getFileSizeMB(outputPath);
-    console.log(`Finished: New Size ${newSize.toFixed(2)}MB`);
-
-    // Add header so frontend knows the final size
     res.set('X-Original-Size', originalSize.toFixed(2));
     res.set('X-New-Size', newSize.toFixed(2));
 
     res.download(outputPath, 'compressed.pdf', (err) => {
-      if (err) console.error(err);
-      fs.unlinkSync(inputPath);
-      fs.unlinkSync(outputPath);
+      cleanup(inputPath, outputPath);
     });
   });
 });
 
+// 3. EXTRACT ROUTE
 app.post('/extract', upload.single('pdfFile'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
   const outputDir = `uploads/extract_${Date.now()}`;
   
-  // Create output directory
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
-  // Get Parameters
-  const mode = req.body.mode || 'images'; // 'images' or 'pages'
-  const format = req.body.format || 'png'; // 'png', 'jpg', 'tiff'
+  const mode = req.body.mode || 'images';
+  const format = req.body.format || 'png';
+  const password = req.body.password || '';
 
-  console.log(`Processing: Mode=${mode}, Format=${format}`);
+  console.log(`Extracting: Mode=${mode}, Format=${format}`);
 
-  let cmd = '';
   const outputPrefix = `${outputDir}/output`;
-
-  // --- STRATEGY SELECTION ---
+  let cmd = '';
 
   if (mode === 'pages') {
-    // MODE 1: Convert Whole Pages (Uses Ghostscript)
-    // -r150 = 150 DPI (Good balance of quality/speed)
-    // %03d = Numbering (001, 002, 003)
-    
-    let device = 'png16m'; // Default PNG
+    // Ghostscript for Pages
+    let device = 'png16m';
     if (format === 'jpg') device = 'jpeg';
     if (format === 'tiff') device = 'tiff24nc';
 
-    // Output filename pattern: output-001.png
     const outputFile = `${outputPrefix}-%03d.${format}`;
+    const passFlag = password ? `-sPDFPassword="${password}"` : '';
     
-    cmd = `gs -dSAFER -dBATCH -dNOPAUSE -sDEVICE=${device} -r150 -sOutputFile="${outputFile}" "${inputPath}"`;
+    cmd = `gs -dSAFER -dBATCH -dNOPAUSE -sDEVICE=${device} ${passFlag} -r150 -sOutputFile="${outputFile}" "${inputPath}"`;
   } 
   else {
-    // MODE 2: Extract Embedded Images (Uses pdfimages)
+    // pdfimages for Embedded Images
     let formatFlag = '-png';
     if (format === 'jpg') formatFlag = '-j';
     if (format === 'tiff') formatFlag = '-tiff';
 
-    cmd = `pdfimages ${formatFlag} "${inputPath}" "${outputPrefix}"`;
+    // pdfimages uses -opw for owner password or -upw for user password. 
+    // Usually -upw is what users have.
+    const passFlag = password ? `-upw "${password}"` : '';
+
+    cmd = `pdfimages ${formatFlag} ${passFlag} "${inputPath}" "${outputPrefix}"`;
   }
 
-  // --- EXECUTION ---
-
   exec(cmd, (error, stdout, stderr) => {
+    // 1. Check for Password Error
+    if (checkPasswordError(stderr, stdout)) {
+      cleanup(inputPath, null, outputDir);
+      return res.status(401).send('PASSWORD_REQUIRED');
+    }
+
+    // 2. Check for General Error
     if (error) {
-      console.error(`Exec Error: ${error}`);
-      cleanup(inputPath, outputDir);
+      console.error(`Extract exec error: ${error}`);
+      cleanup(inputPath, null, outputDir);
       return res.status(500).send('Processing failed.');
     }
 
-    // Check if files exist
+    // 3. Validate Output
     const extractedFiles = fs.readdirSync(outputDir);
-
     if (extractedFiles.length === 0) {
-      cleanup(inputPath, outputDir);
+      cleanup(inputPath, null, outputDir);
       const msg = mode === 'images' 
         ? 'No embedded images found. Try "Extract Pages" instead.' 
         : 'Could not render pages.';
       return res.status(422).send(msg);
     }
 
-    // Zip and Send
+    // 4. Zip and Send
     const zipPath = `${outputDir}.zip`;
     const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -207,12 +218,12 @@ app.post('/extract', upload.single('pdfFile'), (req, res) => {
     output.on('close', () => {
       const filename = mode === 'pages' ? `pages_${format}.zip` : `images_${format}.zip`;
       res.download(zipPath, filename, (err) => {
-        cleanup(inputPath, outputDir, zipPath);
+        cleanup(inputPath, zipPath, outputDir);
       });
     });
 
     archive.on('error', (err) => {
-      cleanup(inputPath, outputDir, zipPath);
+      cleanup(inputPath, zipPath, outputDir);
       res.status(500).send('Zip creation failed.');
     });
 
@@ -221,14 +232,6 @@ app.post('/extract', upload.single('pdfFile'), (req, res) => {
     archive.finalize();
   });
 });
-
-function cleanup(input, dir, zip = null) {
-  try {
-    if (fs.existsSync(input)) fs.unlinkSync(input);
-    if (zip && fs.existsSync(zip)) fs.unlinkSync(zip);
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  } catch (e) {}
-}
 
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${port}`);
