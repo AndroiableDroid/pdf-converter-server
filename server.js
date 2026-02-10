@@ -233,6 +233,41 @@ app.post('/extract', upload.single('pdfFile'), (req, res) => {
   });
 });
 
+// 4. UNLOCK ROUTE (Remove Password)
+app.post('/unlock', upload.single('pdfFile'), (req, res) => {
+  if (!req.file) return res.status(400).send('No file uploaded.');
+  
+  const inputPath = req.file.path;
+  const outputPath = `uploads/unlocked_${req.file.filename}.pdf`;
+  const password = req.body.password;
+
+  if (!password) {
+    cleanup(inputPath);
+    return res.status(400).send('Password is required.');
+  }
+
+  // Ghostscript command to decrypt
+  // We pass the password. The output will be a standard, unencrypted PDF.
+  const gsCommand = `gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sPDFPassword="${password}" -sOutputFile="${outputPath}" "${inputPath}"`;
+
+  console.log('Unlocking file...');
+
+  exec(gsCommand, (error, stdout, stderr) => {
+    // Check if Ghostscript failed (likely wrong password)
+    if (error || stderr.toLowerCase().includes('password')) {
+      console.error(`Unlock failed: ${stderr}`);
+      cleanup(inputPath, outputPath);
+      return res.status(401).send('Incorrect Password or File Error');
+    }
+
+    // Success
+    console.log('File unlocked successfully.');
+    res.download(outputPath, 'unlocked.pdf', (err) => {
+      cleanup(inputPath, outputPath);
+    });
+  });
+});
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${port}`);
 });
