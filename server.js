@@ -8,12 +8,90 @@ const archiver = require('archiver');
 
 const app = express();
 const port = process.env.PORT || 3000;
+app.set('trust proxy', 1); // Render sits behind a proxy; this makes req.ip reliable.
 
 // Enable CORS for Angular
 app.use(cors());
 
 // Configure Multer for file uploads
 const upload = multer({ dest: 'uploads/' });
+
+// --- THROTTLING ---
+const WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || `${15 * 60 * 1000}`, 10);
+const MAX_REQUESTS_PER_WINDOW = parseInt(process.env.RATE_LIMIT_MAX || '60', 10);
+const HEAVY_MAX_REQUESTS_PER_WINDOW = parseInt(process.env.HEAVY_RATE_LIMIT_MAX || '10', 10);
+const MAX_CONCURRENT_JOBS = parseInt(process.env.MAX_CONCURRENT_JOBS || '2', 10);
+
+const globalIpHits = new Map();
+const heavyIpHits = new Map();
+let activeHeavyJobs = 0;
+
+const getIp = (req) => req.ip || req.socket?.remoteAddress || 'unknown';
+
+const clearExpired = (store, now, windowMs) => {
+  for (const [key, bucket] of store.entries()) {
+    if (now - bucket.windowStart >= windowMs) store.delete(key);
+  }
+};
+
+const createIpRateLimiter = ({ store, maxRequests, windowMs, message }) => {
+  return (req, res, next) => {
+    const now = Date.now();
+    const ip = getIp(req);
+
+    clearExpired(store, now, windowMs);
+
+    const existing = store.get(ip);
+    if (!existing || now - existing.windowStart >= windowMs) {
+      store.set(ip, { count: 1, windowStart: now });
+      return next();
+    }
+
+    existing.count += 1;
+    if (existing.count > maxRequests) {
+      const retryAfterSeconds = Math.ceil((windowMs - (now - existing.windowStart)) / 1000);
+      res.set('Retry-After', String(Math.max(retryAfterSeconds, 1)));
+      return res.status(429).send(message);
+    }
+
+    return next();
+  };
+};
+
+const globalRateLimit = createIpRateLimiter({
+  store: globalIpHits,
+  maxRequests: MAX_REQUESTS_PER_WINDOW,
+  windowMs: WINDOW_MS,
+  message: 'Too many requests. Please try again later.',
+});
+
+const heavyRouteRateLimit = createIpRateLimiter({
+  store: heavyIpHits,
+  maxRequests: HEAVY_MAX_REQUESTS_PER_WINDOW,
+  windowMs: WINDOW_MS,
+  message: 'Too many conversion requests. Please wait and retry.',
+});
+
+const limitConcurrentHeavyJobs = (req, res, next) => {
+  if (activeHeavyJobs >= MAX_CONCURRENT_JOBS) {
+    res.set('Retry-After', '10');
+    return res.status(429).send('Server is busy. Please retry shortly.');
+  }
+
+  activeHeavyJobs += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeHeavyJobs = Math.max(activeHeavyJobs - 1, 0);
+  };
+
+  res.on('finish', release);
+  res.on('close', release);
+  next();
+};
+
+app.use(globalRateLimit);
 
 // --- HELPER FUNCTIONS ---
 
@@ -49,7 +127,7 @@ app.get('/', (req, res) => {
 });
 
 // 1. CONVERT ROUTE (RGB -> CMYK)
-app.post('/convert', upload.single('pdfFile'), (req, res) => {
+app.post('/convert', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
@@ -85,7 +163,7 @@ app.post('/convert', upload.single('pdfFile'), (req, res) => {
 });
 
 // 2. COMPRESS ROUTE
-app.post('/compress', upload.single('pdfFile'), (req, res) => {
+app.post('/compress', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
@@ -145,7 +223,7 @@ app.post('/compress', upload.single('pdfFile'), (req, res) => {
 });
 
 // 3. EXTRACT ROUTE
-app.post('/extract', upload.single('pdfFile'), (req, res) => {
+app.post('/extract', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
@@ -234,7 +312,7 @@ app.post('/extract', upload.single('pdfFile'), (req, res) => {
 });
 
 // 4. UNLOCK ROUTE (Remove Password)
-app.post('/unlock', upload.single('pdfFile'), (req, res) => {
+app.post('/unlock', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
   
   const inputPath = req.file.path;
