@@ -122,12 +122,12 @@ const checkPasswordError = (stderr, stdout) => {
 
 // --- ROUTES ---
 
-app.get('/', (req, res) => {
+const rootHandler = (req, res) => {
   res.send('PDF Converter Backend is Running!');
-});
+};
 
 // 1. CONVERT ROUTE (RGB -> CMYK)
-app.post('/convert', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
+const convertHandler = (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
@@ -160,10 +160,10 @@ app.post('/convert', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.singl
       cleanup(inputPath, outputPath);
     });
   });
-});
+};
 
 // 2. COMPRESS ROUTE
-app.post('/compress', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
+const compressHandler = (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
@@ -220,10 +220,10 @@ app.post('/compress', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.sing
       cleanup(inputPath, outputPath);
     });
   });
-});
+};
 
 // 3. EXTRACT ROUTE
-app.post('/extract', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
+const extractHandler = (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
 
   const inputPath = req.file.path;
@@ -309,10 +309,10 @@ app.post('/extract', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.singl
     archive.directory(outputDir, false);
     archive.finalize();
   });
-});
+};
 
 // 4. UNLOCK ROUTE (Remove Password)
-app.post('/unlock', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), (req, res) => {
+const unlockHandler = (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
   
   const inputPath = req.file.path;
@@ -344,8 +344,35 @@ app.post('/unlock', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single
       cleanup(inputPath, outputPath);
     });
   });
-});
+};
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Server running at http://0.0.0.0:${port}`);
-});
+app.get('/', rootHandler);
+app.post('/convert', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), convertHandler);
+app.post('/compress', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), compressHandler);
+app.post('/extract', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), extractHandler);
+app.post('/unlock', heavyRouteRateLimit, limitConcurrentHeavyJobs, upload.single('pdfFile'), unlockHandler);
+
+const resetThrottlingState = () => {
+  globalIpHits.clear();
+  heavyIpHits.clear();
+  activeHeavyJobs = 0;
+};
+
+if (require.main === module) {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Server running at http://0.0.0.0:${port}`);
+  });
+}
+
+module.exports = {
+  app,
+  resetThrottlingState,
+  globalRateLimit,
+  heavyRouteRateLimit,
+  limitConcurrentHeavyJobs,
+  rootHandler,
+  convertHandler,
+  compressHandler,
+  extractHandler,
+  unlockHandler,
+};
